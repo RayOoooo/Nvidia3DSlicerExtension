@@ -186,33 +186,46 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
         qt.QMessageBox.information(slicer.util.mainWindow(), 'NVIDIA AIAA', msg)
 
     def updateSegmentationMask(self, json, in_file):
+        logging.info('Update Segmentation Mask from: {}'.format(in_file))
         if in_file is None:
             return False
 
-        labelImage = sitk.ReadImage(in_file)
-        # cc = sitk.ConnectedComponentImageFilter()
-        # labelCC = cc.Execute(sitk.Cast(labelImage, sitk.sitkUInt8))
-        labelmapVolumeNode = sitkUtils.PushVolumeToSlicer(labelImage, None)
-
-        newSegmentLabelmap = vtkSegmentationCore.vtkOrientedImageData()
-        newSegmentLabelmap.DeepCopy(labelmapVolumeNode.GetImageData())
-
         segmentationNode = self.scriptedEffect.parameterSetNode().GetSegmentationNode()
         selectedSegmentId = self.scriptedEffect.parameterSetNode().GetSelectedSegmentID()
-        slicer.vtkSlicerSegmentationsModuleLogic.SetBinaryLabelmapToSegment(
-            newSegmentLabelmap,
-            segmentationNode,
-            selectedSegmentId,
-            slicer.vtkSlicerSegmentationsModuleLogic.MODE_REPLACE,
-            newSegmentLabelmap.GetExtent())
 
-        segment = segmentationNode.GetSegmentation().GetSegment(selectedSegmentId)
+        segmentation = segmentationNode.GetSegmentation()
+        segment = segmentation.GetSegment(selectedSegmentId)
+        color = segment.GetColor()
+        label = segment.GetName()
+
+        labelImage = sitk.ReadImage(in_file)
+        labelmapVolumeNode = sitkUtils.PushVolumeToSlicer(labelImage, None, className='vtkMRMLLabelMapVolumeNode')
+        labelmapVolumeNode.SetName(label)
+        # [success, labelmapVolumeNode] = slicer.util.loadLabelVolume(in_file, {'name': label}, returnNode=True)
+
+        logging.info('Removing temp segmentation with id: {} with color: {}'.format(selectedSegmentId, color))
+        segmentationNode.RemoveSegment(selectedSegmentId)
+
+        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapVolumeNode, segmentationNode)
+        slicer.mrmlScene.RemoveNode(labelmapVolumeNode)
+
+        for i in range(segmentation.GetNumberOfSegments()):
+            segmentId = segmentation.GetNthSegmentID(i)
+            segment = segmentation.GetSegment(segmentId)
+            logging.info('Setting new segmentation with id: {}'.format(segmentId))
+            if i == 0:
+                segment.SetColor(color)
+                segment.SetName(label)
+                self.scriptedEffect.parameterSetNode().SetSelectedSegmentID(segmentId)
+            else:
+                segment.SetName(label + '_' + str(i))
+
         points = None if json is None else json.get('points')
         logging.info('Extreme Points: {}'.format(points))
         if points is not None:
             segment.SetTag("DExtr3DExtremePoints", points)
 
-        self.extremePoints[segment.GetName()] = json
+        self.extremePoints[label] = json
         os.unlink(in_file)
         return True
 
@@ -505,8 +518,6 @@ class AIAALogic():
         resample.SetSize(out_size)
         resample.SetOutputDirection(itk_image.GetDirection())
         resample.SetOutputOrigin(itk_image.GetOrigin())
-        resample.SetTransform(sitk.Transform())
-        resample.SetDefaultPixelValue(itk_image.GetPixelIDValue())
 
         if linear:
             resample.SetInterpolator(sitk.sitkLinear)
