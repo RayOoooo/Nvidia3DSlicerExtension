@@ -601,6 +601,7 @@ class AIAALogic():
         itk_result = sitk.GetImageFromArray(result)
         itk_result.SetDirection(orig_image.GetDirection())
         itk_result.SetSpacing(orig_image.GetSpacing())
+        itk_result.SetOrigin(orig_image.GetOrigin())
 
         sitk.WriteImage(itk_result, output_file, True)
 
