@@ -1,18 +1,22 @@
-import os
-import vtk, qt, ctk, slicer
-import logging
-from SegmentEditorEffects import *
-import httplib
-import urllib
-import json
-import mimetypes
 import cgi
-import SimpleITK as sitk
-import sitkUtils
-import tempfile
+import json
+import logging
+import mimetypes
 import os
+import os
+import tempfile
+import urllib
+
+import SimpleITK as sitk
+import ctk
+import httplib
 import numpy as np
+import qt
+import sitkUtils
+import slicer
+import vtk
 import vtkSegmentationCorePython as vtkSegmentationCore
+from SegmentEditorEffects import *
 
 
 class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
@@ -171,7 +175,6 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
                 self.annotationModelSelector.addItem(model_name)
 
         self.segmentationButton.enabled = self.segmentationModelSelector.count > 0
-        self.onClickEditPoints()
         self.updateGUIFromMRML()
 
         msg = ''
@@ -206,24 +209,37 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
         logging.info('Removing temp segmentation with id: {} with color: {}'.format(selectedSegmentId, color))
         segmentationNode.RemoveSegment(selectedSegmentId)
 
+        originalSegments = dict()
+        for i in range(segmentation.GetNumberOfSegments()):
+            segmentId = segmentation.GetNthSegmentID(i)
+            originalSegments[segmentId] = i
+
         slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapVolumeNode, segmentationNode)
         slicer.mrmlScene.RemoveNode(labelmapVolumeNode)
 
+        addedSegments = 0
         for i in range(segmentation.GetNumberOfSegments()):
             segmentId = segmentation.GetNthSegmentID(i)
             segment = segmentation.GetSegment(segmentId)
-            logging.info('Setting new segmentation with id: {}'.format(segmentId))
-            if i == 0:
+            if originalSegments.get(segmentId) is not None:
+                logging.info('No change for existing segment with id: {} => {}'.format(segmentId, segment.GetName()))
+                continue
+
+            logging.info('Setting new segmentation with id: {} => {}'.format(segmentId, segment.GetName()))
+            if addedSegments == 0:
                 segment.SetColor(color)
                 segment.SetName(label)
-                self.scriptedEffect.parameterSetNode().SetSelectedSegmentID(segmentId)
-            else:
-                segment.SetName(label + '_' + str(i))
 
-        points = None if json is None else json.get('points')
-        logging.info('Extreme Points: {}'.format(points))
-        if points is not None:
-            segment.SetTag("DExtr3DExtremePoints", points)
+                self.scriptedEffect.parameterSetNode().SetSelectedSegmentID(segmentId)
+                points = None if json is None else json.get('points')
+                logging.info('Extreme Points: {}'.format(points))
+                if points is not None:
+                    segment.SetTag("DExtr3DExtremePoints", points)
+
+            else:
+                segment.SetName(label + '_' + str(addedSegments))
+            addedSegments = addedSegments + 1
+        logging.info('Total Added Segments for {}: {}'.format(label, addedSegments))
 
         self.extremePoints[label] = json
         os.unlink(in_file)
@@ -242,7 +258,7 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
         result = 'SUCCESS' if self.updateSegmentationMask(json, result_file) is True else 'FAILED'
 
         if result is 'SUCCESS':
-            self.onClickEditPoints()
+            self.segmentMarkupNode.RemoveAllMarkups()
             self.updateGUIFromMRML()
 
         qt.QApplication.restoreOverrideCursor()
@@ -265,7 +281,6 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
         result = 'SUCCESS' if self.updateSegmentationMask(json, result_file) is True else 'FAILED'
 
         if result is 'SUCCESS':
-            self.onClickEditPoints()
             self.updateGUIFromMRML()
 
         qt.QApplication.restoreOverrideCursor()
@@ -278,20 +293,25 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
         segmentID = self.scriptedEffect.parameterSetNode().GetSelectedSegmentID()
         segmentationNode = self.scriptedEffect.parameterSetNode().GetSegmentationNode()
         segment = segmentationNode.GetSegmentation().GetSegment(segmentID)
+        label = segment.GetName()
 
         self.segmentMarkupNode.RemoveAllMarkups()
 
         fPosStr = vtk.mutable("")
         segment.GetTag("DExtr3DExtremePoints", fPosStr)
-        logging.info('Extreme points are: '.format(fPosStr))
+        logging.info('{} => {} Extreme points are: '.format(segmentID, label, fPosStr))
 
         if fPosStr is not None and len(fPosStr) > 0:
             points = json.loads(str(fPosStr))
             for p in points:
                 logging.info('Extreme Point: {}'.format(p))
                 self.segmentMarkupNode.AddFiducialFromArray(p)
-
-            self.annoEditButton.setEnabled(False)
+        else:
+            qt.QMessageBox.information(
+                slicer.util.mainWindow(),
+                'NVIDIA AIAA',
+                'There are no pre-existing extreme points available for (' + segment.GetName() + ')' + '\t')
+        self.updateGUIFromMRML()
 
     def reset(self):
         if self.fiducialPlacementToggle.placeModeEnabled:
@@ -495,6 +515,7 @@ class AIAALogic():
             with tempfile.NamedTemporaryFile(suffix='.nii.gz', delete=False) as f:
                 f.write(files[fname])
                 cropped_out_file = f.name
+                logging.info('Cropped Output: {}'.format(cropped_out_file))
 
             result_file = tempfile.NamedTemporaryFile(suffix='.nii.gz').name
             AIAALogic.image_post_processing(cropped_out_file, result_file, crop, in_file)
@@ -502,7 +523,7 @@ class AIAALogic():
         os.unlink(in_file)
         os.unlink(cropped_file)
         os.unlink(cropped_out_file)
-        return form, result_file
+        return {'points': json.dumps(pointset)}, result_file
 
     @staticmethod
     def resample_image(itk_image, out_size, linear):
@@ -518,6 +539,8 @@ class AIAALogic():
         resample.SetSize(out_size)
         resample.SetOutputDirection(itk_image.GetDirection())
         resample.SetOutputOrigin(itk_image.GetOrigin())
+        # resample.SetTransform(sitk.Transform(3, sitk.sitkIdentity))
+        # resample.SetDefaultPixelValue(itk_image.GetPixelIDValue())
 
         if linear:
             resample.SetInterpolator(sitk.sitkLinear)
