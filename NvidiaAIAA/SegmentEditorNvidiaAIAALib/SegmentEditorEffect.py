@@ -3,19 +3,17 @@ import json
 import logging
 import mimetypes
 import os
-import os
+import sys
 import tempfile
 import urllib
 
 import SimpleITK as sitk
-import ctk
 import httplib
 import numpy as np
 import qt
 import sitkUtils
 import slicer
 import vtk
-import vtkSegmentationCorePython as vtkSegmentationCore
 from SegmentEditorEffects import *
 
 
@@ -28,7 +26,6 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
         AbstractScriptedSegmentEditorEffect.__init__(self, scriptedEffect)
 
         self.extremePoints = dict()
-        self.annotationPointSet = []
         self.models = dict()
 
         # Effect-specific members
@@ -114,6 +111,7 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
         self.annoEditButton.setIcon(self.icon('edit-icon.png'))
         self.annoEditButton.objectName = self.__class__.__name__ + 'Edit'
         self.annoEditButton.setToolTip("Edit the previously placed group of fiducials.")
+        self.annoEditButton.setEnabled(False)
 
         fiducialActionLayout = qt.QHBoxLayout()
         fiducialActionLayout.addWidget(self.fiducialPlacementToggle)
@@ -267,6 +265,26 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
             'NVIDIA AIAA',
             'Run segmentation for (' + model + '): ' + result + '\t')
 
+    def getFiducialPointsXYZ(self):
+        v = self.scriptedEffect.parameterSetNode().GetMasterVolumeNode()
+        RasToIjkMatrix = vtk.vtkMatrix4x4()
+        v.GetRASToIJKMatrix(RasToIjkMatrix)
+
+        point_set = []
+        n = self.segmentMarkupNode.GetNumberOfFiducials()
+        for i in range(n):
+            coord = [0.0, 0.0, 0.0]
+            self.segmentMarkupNode.GetNthFiducialPosition(i, coord)
+
+            p_Ras = [coord[0], coord[1], coord[2], 1.0]
+            p_Ijk = RasToIjkMatrix.MultiplyDoublePoint(p_Ras)
+
+            logging.info('From Fiducial: {} => {}'.format(coord, p_Ijk))
+            point_set.append(p_Ijk[0:3])
+
+        logging.info('Current Fiducials-Points: {}'.format(point_set))
+        return point_set
+
     def onClickAnnotation(self):
         logic = AIAALogic(self.serverIP.text, int(self.serverPort.text))
         model = self.annotationModelSelector.currentText
@@ -277,7 +295,8 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
 
         inputVolume = self.scriptedEffect.parameterSetNode().GetMasterVolumeNode()
         modelInfo = self.models.get(model)
-        json, result_file = logic.dextr3d(model, self.annotationPointSet, inputVolume, modelInfo)
+        pointSet = self.getFiducialPointsXYZ()
+        json, result_file = logic.dextr3d(model, pointSet, inputVolume, modelInfo)
         result = 'SUCCESS' if self.updateSegmentationMask(json, result_file) is True else 'FAILED'
 
         if result is 'SUCCESS':
@@ -297,6 +316,10 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
 
         self.segmentMarkupNode.RemoveAllMarkups()
 
+        v = self.scriptedEffect.parameterSetNode().GetMasterVolumeNode()
+        IjkToRasMatrix = vtk.vtkMatrix4x4()
+        v.GetIJKToRASMatrix(IjkToRasMatrix)
+
         fPosStr = vtk.mutable("")
         segment.GetTag("DExtr3DExtremePoints", fPosStr)
         logging.info('{} => {} Extreme points are: '.format(segmentID, label, fPosStr))
@@ -304,8 +327,10 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
         if fPosStr is not None and len(fPosStr) > 0:
             points = json.loads(str(fPosStr))
             for p in points:
-                logging.info('Extreme Point: {}'.format(p))
-                self.segmentMarkupNode.AddFiducialFromArray(p)
+                p_Ijk = [p[0], p[1], p[2], 1.0]
+                p_Ras = IjkToRasMatrix.MultiplyDoublePoint(p_Ijk)
+                logging.info('Add Fiducial: {} => {}'.format(p_Ijk, p_Ras))
+                self.segmentMarkupNode.AddFiducialFromArray(p_Ras[0:3])
         else:
             qt.QMessageBox.information(
                 slicer.util.mainWindow(),
@@ -316,9 +341,6 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
     def reset(self):
         if self.fiducialPlacementToggle.placeModeEnabled:
             self.fiducialPlacementToggle.setPlaceModeEnabled(False)
-
-        if not self.annoEditButton.isEnabled():
-            self.annoEditButton.setEnabled(True)
 
         if self.segmentMarkupNode:
             slicer.mrmlScene.RemoveNode(self.segmentMarkupNode)
@@ -354,8 +376,9 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
 
         segmentID = self.scriptedEffect.parameterSetNode().GetSelectedSegmentID()
         segmentationNode = self.scriptedEffect.parameterSetNode().GetSegmentationNode()
-        if segmentID and segmentationNode:
+        if segmentID and segmentationNode and self.annotationModelSelector.count > 0:
             segment = segmentationNode.GetSegmentation().GetSegment(segmentID)
+            self.annoEditButton.setEnabled(True)
             self.annoEditButton.setVisible(segment.HasTag("DExtr3DExtremePoints"))
 
     def updateMRMLFromGUI(self):
@@ -412,24 +435,10 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorEffect):
         self.updateGUIFromMRML()
 
     def updateModelFromSegmentMarkupNode(self):
-        if not self.segmentMarkupNode:
-            return
-
-        # Run Annotation Logic
-        logging.info('Added Point - Pre-Check Annotation Logic here...')
-        # get fiducial positions as space-separated list
-
-        n = self.segmentMarkupNode.GetNumberOfFiducials()
-        self.annotationPointSet = []
-        for i in range(n):
-            coord = [0.0, 0.0, 0.0]
-            self.segmentMarkupNode.GetNthFiducialPosition(i, coord)
-            self.annotationPointSet.append(coord)
-        logging.info('Current Fiducials-Points: {}'.format(self.annotationPointSet))
+        self.updateGUIFromMRML()
 
     def interactionNodeModified(self, interactionNode):
-        # Override default behavior: keep the effect active if markup placement mode is activated
-        pass
+        self.updateGUIFromMRML()
 
 
 class AIAALogic():
@@ -555,16 +564,43 @@ class AIAALogic():
         image_size = itk_image.GetSize()
 
         target_size = tuple(map(int, roi_size.split('x')))
-        points = np.asanyarray(point_set)
+        points = np.asanyarray(np.array(point_set).astype(int))
+
+        print('Image Size: {}'.format(image_size))
+        print('Image Spacing: {}'.format(spacing))
+        print('Target Size: {}'.format(target_size))
+        print('Input Points: {}'.format(json.dumps(points.tolist())))
+
+        indexMin = [sys.maxsize, sys.maxsize, sys.maxsize]
+        indexMax = [0, 0, 0]
+        vxPad = [0, 0, 0]
+        for point in points:
+            for i in range(3):
+                vxPad[i] = int((pad / spacing[i]) if spacing[i] > 0 else pad)
+                indexMin[i] = min(max(int(point[i] - vxPad[i]), 0), int(indexMin[i]))
+                indexMax[i] = max(min(int(point[i] + vxPad[i]), int(image_size[i] - 1)), int(indexMax[i]))
+        print('Voxel Padding: {}'.format(vxPad))
+        print('Min Index: {}'.format(indexMin))
+        print('Max Index: {}'.format(indexMax))
+
+        cropIndex = [0, 0, 0]
+        cropSize = [0, 0, 0]
+        crop = []
+        for i in range(3):
+            cropIndex[i] = indexMin[i]
+            cropSize[i] = indexMax[i] - indexMin[i]
+            crop.append([cropIndex[i], cropIndex[i] + cropSize[i]])
+        print('cropIndex: {}'.format(cropIndex))
+        print('cropSize: {}'.format(cropSize))
+        print('crop: {}'.format(crop))
 
         # get bounding box
-        x1 = int(max(0, np.min(points[::, 0]) - int(pad / spacing[0])))
-        x2 = int(min(image_size[0], np.max(points[::, 0]) + int(pad / spacing[0])))
-        y1 = int(max(0, np.min(points[::, 1]) - int(pad / spacing[1])))
-        y2 = int(min(image_size[1], np.max(points[::, 1]) + int(pad / spacing[1])))
-        z1 = int(max(0, np.min(points[::, 2]) - int(pad / spacing[2])))
-        z2 = int(min(image_size[2], np.max(points[::, 2]) + int(pad / spacing[2])))
-        crop = [[x1, x2], [y1, y2], [z1, z2]]
+        x1 = crop[0][0]
+        x2 = crop[0][1]
+        y1 = crop[1][0]
+        y2 = crop[1][1]
+        z1 = crop[2][0]
+        z2 = crop[2][1]
 
         # crop
         points[::, 0] = points[::, 0] - x1
@@ -573,13 +609,15 @@ class AIAALogic():
 
         cropped_image = itk_image[x1:x2, y1:y2, z1:z2]
         cropped_size = cropped_image.GetSize()
+        print('Cropped size: {}'.format(cropped_size))
 
         # resize
-        ratio = np.divide(np.asanyarray(target_size, dtype=np.float), np.asanyarray(cropped_size, dtype=np.float))
         out_image = AIAALogic.resample_image(cropped_image, target_size, True)
-
+        print('Cropped Image Size: {}'.format(out_image.GetSize()))
         sitk.WriteImage(out_image, output_file, True)
 
+        # pointsROI
+        ratio = np.divide(np.asanyarray(target_size, dtype=np.float), np.asanyarray(cropped_size, dtype=np.float))
         points[::, 0] = points[::, 0] * ratio[0]
         points[::, 1] = points[::, 1] * ratio[1]
         points[::, 2] = points[::, 2] * ratio[2]
