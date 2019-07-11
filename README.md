@@ -6,3 +6,5 @@ Open 3D Slicer: Go to Edit -> Application Settings -> Modules -> Additional Modu
    2) Restart
 
 Click/Select Segmentation Editor and you should be able to see "Nvidia AIAA" extension
+
+![Alt text](/snapshot.png?raw=true "NVIDIA In Action")
