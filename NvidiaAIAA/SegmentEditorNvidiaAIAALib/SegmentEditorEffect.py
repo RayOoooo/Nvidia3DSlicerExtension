@@ -8,7 +8,12 @@ import tempfile
 import urllib
 
 import SimpleITK as sitk
-import httplib
+try:
+    # Python2
+    import httplib
+except ModuleNotFoundError as e:
+    # Python3
+    import http.client as httplib
 import numpy as np
 import qt
 import sitkUtils
@@ -447,11 +452,21 @@ class AIAALogic():
         self.server_version = server_version
         logging.info('Using URI: {}'.format(self.server_url))
 
+    @staticmethod
+    def urllib_quote_plus(s):
+        try:
+            # Python2
+            return urllib.quote_plus(s)
+        except AttributeError:
+            # Python3
+            return urllib.parse.quote_plus(s)
+        return 
+
     def list_models(self, label=None):
         conn = httplib.HTTPConnection(self.server_url)
         selector = '/' + self.server_version + '/models'
         if label is not None and len(label) > 0:
-            selector += '?label=' + urllib.quote_plus(label)
+            selector += '?label=' + AIAALogic.urllib_quote_plus(label)
 
         logging.info('Using Selector: {}'.format(selector))
         conn.request('GET', selector)
@@ -465,7 +480,7 @@ class AIAALogic():
         slicer.util.saveNode(inputVolume, in_file)
         logging.info('Saved Input Node into: {}'.format(in_file))
 
-        selector = '/' + self.server_version + '/segmentation?model=' + urllib.quote_plus(model)
+        selector = '/' + self.server_version + '/segmentation?model=' + AIAALogic.urllib_quote_plus(model)
         fields = {'params': '{}'}
         files = {'datapoint': in_file}
 
@@ -503,7 +518,7 @@ class AIAALogic():
         cropped_file = tempfile.NamedTemporaryFile(suffix='.nii.gz').name
         points, crop = AIAALogic.image_pre_process(in_file, cropped_file, pointset, pad, roi_size)
 
-        selector = '/' + self.server_version + '/dextr3d?model=' + urllib.quote_plus(model)
+        selector = '/' + self.server_version + '/dextr3d?model=' + AIAALogic.urllib_quote_plus(model)
         params = dict()
         params['points'] = json.dumps(points)
 
